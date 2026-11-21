@@ -1,283 +1,249 @@
-// Boot and the one loop: input is read every frame, the world advances
-// in fixed 1/60 s steps (several in a slow frame, none in a fast one),
-// and the renderer paints what is there. The game moves between the
-// title, the phone card, play, paused, busted, wasted, failed and story
-// complete screens. The save lives in local storage; without it the game
-// still plays and the save lasts the visit.
-//
-// ?seed=N fixes the city. ?shot=1-finale|2-chase|3-pickup|4-steal (with
-// &seed=N) stages that scene instead of running the loop, paints it
-// twice and sets window.__shotReady for a screenshot.
-import { STEP, SAVE_KEY, BEST_KEY, MISSIONS } from './config.js';
-import { createRandom } from './random.js';
-import {
-  createWorld, EVENT_CRASH, EVENT_PICKUP, EVENT_PUNCH, EVENT_MISSION,
-  EVENT_BUSTED, EVENT_WASTED, EVENT_FAILED, EVENT_SCREECH,
-} from './world.js';
-import {
-  ACTION_CONFIRM, ACTION_PAUSE, ACTION_MUTE, ACTION_RESTART, createInput,
-} from './input.js';
+// Boot and the one loop, plus the screen flow. The simulation lives in
+// world.js; this file wires the canvas, the input, the audio and the
+// screens together and steps the world at a fixed sixtieth of a second.
+
+import { CONFIG } from './config.js';
+import { createWorld, beginMission, updatePlaying, saveGame, loadSave } from './world.js';
+import { createInput } from './input.js';
 import { createAudio } from './audio.js';
-import {
-  createRenderer, SCREEN_TITLE, SCREEN_CARD, SCREEN_PLAY, SCREEN_PAUSED,
-  SCREEN_BUSTED, SCREEN_WASTED, SCREEN_FAILED, SCREEN_COMPLETE,
-} from './render.js';
-import { stageShot } from './shots.js';
-
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+import { render, cameraFor, buttonHit } from './render.js';
+import { setupShot, stepShot } from './shots.js';
 
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const ctx = canvas.getContext('2d');
+const params = new URLSearchParams(location.search);
+const seed = parseInt(params.get('seed') || '1234', 10) || 1234;
+const shotParam = params.get('shot');
+
+const input = createInput(canvas);
 const audio = createAudio();
+const saved = loadSave();
 
-function readSave() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
+let world;
+let shotMode = false;
+if (shotParam) {
+  shotMode = true;
+  world = setupShot(seed, parseInt(shotParam, 10) - 1);
+} else {
+  world = createWorld(seed, saved);
+  world.screen = saved && (saved.cash > 0 || (saved.done && saved.done.length > 0)) ? 'title' : 'title';
+}
+audio.setMuted(world.muted);
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function applyPendingEvent() {
+  const ev = world.pendingEvent;
+  if (!ev) return;
+  world.pendingEvent = null;
+  if (ev === 'complete') {
+    audio.jingle();
+    if (world.missionsDone.length >= 5) world.screen = 'story';
+    else world.screen = 'complete';
+  } else if (ev === 'failed') {
+    world.screen = 'failed';
+  } else if (ev === 'busted') {
+    audio.busted();
+    world.screen = 'busted';
+  } else if (ev === 'wasted') {
+    audio.busted();
+    world.screen = 'wasted';
   }
 }
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
+
+function nextMissionIndex() {
+  for (let i = 0; i < CONFIG.missions.length; i++) {
+    if (!world.missionsDone.includes(i)) return i;
   }
-}
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage off: the best score lasts this visit only.
-  }
+  return -1;
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world, scene.screen, scene.best, null);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+function openPhoneFor(index) {
+  if (beginMission(world, index)) {
+    world.screen = 'phone';
+    audio.click();
   }
-  requestAnimationFrame(paint);
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  const saved = readSave();
-  let screen = SCREEN_TITLE;
-  let best = Math.max(readBest(), saved ? saved.best || 0 : 0);
-  let hasSave = !!saved;
-  let cardMission = null;
-  window.__solmar = {
-    state: () => world.state,
-    screen: () => screen,
-    hasSave: () => !!readSave(),
-  };
-  let accumulator = 0;
-  let last = performance.now();
-  let pendingEnter = false;
-
-  function announce(message) {
-    status.textContent = message;
+function onTitleConfirm() {
+  audio.resume();
+  audio.startMusic();
+  const hasSave = world.cash > 0 || world.missionsDone.length > 0;
+  if (hasSave) {
+    const next = nextMissionIndex();
+    if (next >= 0) openPhoneFor(next);
+    else world.screen = 'playing';
+  } else {
+    openPhoneFor(0);
   }
+}
 
-  function applySave() {
-    if (!saved) return;
-    world.state.cash = saved.cash || 0;
-    world.state.score = saved.score || 0;
-    world.state.best = Math.max(world.state.best, saved.best || 0);
-    world.state.storyDone = !!saved.storyDone;
-  }
-
-  function startGame(fresh) {
-    world.reset();
-    world.state.best = best;
-    if (!fresh && saved) {
-      applySave();
-      if (saved.missionIndex > 0 && saved.missionIndex < 5) {
-        world.state.missionIndex = saved.missionIndex;
-      }
+function handleScreenInput() {
+  const s = world.screen;
+  if (s === 'title') {
+    if (input.pressed('enter')) onTitleConfirm();
+    if (input.mouse.clicked && buttonHit(input.mouse.clickX, input.mouse.clickY, canvas.width / 2 - 110, canvas.height * 0.28 + 120, 220, 44)) {
+      onTitleConfirm();
     }
-    cardMission = MISSIONS[world.state.missionIndex] || MISSIONS[0];
-    if (world.state.storyDone) {
-      screen = SCREEN_PLAY;
-      announce('Free roam. The debt is paid — Solmar Bay is yours.');
-    } else {
-      screen = SCREEN_CARD;
-      announce(`${cardMission.name}. ${cardMission.brief}`);
+    return;
+  }
+  if (s === 'phone') {
+    if (input.pressed('enter')) {
+      world.screen = 'playing';
+      audio.click();
     }
-    audio.unlock();
-    audio.startMusic();
-  }
-
-  function acceptCard() {
-    world.startMission(cardMission.id - 1);
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${cardMission.objective}.`);
-  }
-
-  function endToTitle() {
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
+    if (input.mouse.clicked && buttonHit(input.mouse.clickX, input.mouse.clickY, canvas.width / 2 - 110, canvas.height * 0.42 + 120, 220, 44)) {
+      world.screen = 'playing';
+      audio.click();
     }
-    world.saveNow();
-    screen = SCREEN_TITLE;
-    hasSave = !!readSave();
-    announce('Solmar Bay. Press Enter to start.');
+    return;
   }
-
-  function handleEvents(events) {
-    if (events & EVENT_CRASH) audio.crash();
-    if (events & EVENT_PICKUP) audio.pickup();
-    if (events & EVENT_PUNCH) audio.punch();
-    if (events & EVENT_SCREECH) audio.screech();
-    if (events & EVENT_MISSION) {
-      audio.jingle();
-      if (world.state.score > best) {
-        best = world.state.score;
-        saveBest(best);
-      }
-      if (world.state.storyDone) {
-        screen = SCREEN_COMPLETE;
-        announce('Story complete. All five jobs done.');
+  if (s === 'pause') {
+    if (input.pressed('pause') || input.pressed('enter')) {
+      world.screen = 'playing';
+      audio.click();
+    }
+    if (input.pressed('restart') && world.mission) {
+      const idx = world.mission.index;
+      openPhoneFor(idx);
+    }
+    if (input.mouse.clicked) {
+      const mx = input.mouse.clickX, my = input.mouse.clickY;
+      if (buttonHit(mx, my, canvas.width / 2 - 110, canvas.height * 0.36 + 60, 220, 44)) {
+        world.screen = 'playing';
+        audio.click();
+      } else if (buttonHit(mx, my, canvas.width / 2 - 110, canvas.height * 0.36 + 116, 220, 44) && world.mission) {
+        openPhoneFor(world.mission.index);
       } else {
-        cardMission = MISSIONS[world.state.missionIndex + 1];
-        screen = SCREEN_CARD;
-        announce(`${cardMission.name}. ${cardMission.brief}`);
+        for (let i = 0; i < CONFIG.missions.length; i++) {
+          if (!world.missionsDone.includes(i)) continue;
+          const y = canvas.height * 0.36 + 180 + i * 34;
+          if (buttonHit(mx, my, canvas.width / 2 - 110, y, 220, 28)) {
+            openPhoneFor(i);
+            break;
+          }
+        }
       }
     }
-    if (events & EVENT_BUSTED) {
-      audio.busted();
-      screen = SCREEN_BUSTED;
-      announce('Busted. Lost 10 percent of your cash.');
-    }
-    if (events & EVENT_WASTED) {
-      audio.busted();
-      screen = SCREEN_WASTED;
-      announce('Wasted. Lost 10 percent of your cash.');
-    }
-    if (events & EVENT_FAILED) {
-      screen = SCREEN_FAILED;
-      announce('Job failed. Press R to retry.');
-    }
+    return;
   }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_MUTE) {
-      audio.setMuted(!audio.isMuted());
+  if (s === 'complete') {
+    if (input.pressed('enter')) {
+      const next = nextMissionIndex();
+      if (next >= 0) openPhoneFor(next);
+      else world.screen = 'playing';
     }
-    if (screen === SCREEN_TITLE) {
-      if (input.takePressed('KeyN')) startGame(true);
-      else if (actions & ACTION_CONFIRM) startGame(false);
-      const click = input.takeClick();
-      if (click) startGame(false);
-      return;
+    if (input.mouse.clicked && buttonHit(input.mouse.clickX, input.mouse.clickY, canvas.width / 2 - 110, canvas.height * 0.3 + 100, 220, 44)) {
+      const next = nextMissionIndex();
+      if (next >= 0) openPhoneFor(next);
+      else world.screen = 'playing';
     }
-    if (screen === SCREEN_CARD) {
-      if (actions & ACTION_CONFIRM) acceptCard();
-      return;
-    }
-    if (screen === SCREEN_PAUSED) {
-      if (actions & ACTION_PAUSE || actions & ACTION_CONFIRM) screen = SCREEN_PLAY;
-      if (actions & ACTION_RESTART) {
-        world.startMission(world.state.missionIndex);
-        screen = SCREEN_PLAY;
-      }
-      return;
-    }
-    if (screen === SCREEN_BUSTED || screen === SCREEN_WASTED) {
-      if (actions & ACTION_CONFIRM) screen = SCREEN_PLAY;
-      return;
-    }
-    if (screen === SCREEN_FAILED) {
-      if (actions & (ACTION_RESTART | ACTION_CONFIRM)) {
-        world.startMission(world.state.missionIndex);
-        screen = SCREEN_PLAY;
-      }
-      return;
-    }
-    if (screen === SCREEN_COMPLETE) {
-      if (actions & ACTION_CONFIRM) screen = SCREEN_PLAY;
-      return;
-    }
-    if (screen === SCREEN_PLAY) {
-      pendingEnter = !!(actions & ACTION_CONFIRM);
-      if (actions & ACTION_PAUSE) {
-        screen = SCREEN_PAUSED;
-        announce('Paused.');
-      }
-      if (actions & ACTION_RESTART) {
-        world.startMission(world.state.missionIndex);
-        announce('Mission restarted.');
-      }
-    }
+    return;
   }
+  if (s === 'failed') {
+    if (input.pressed('enter') || input.pressed('restart')) {
+      openPhoneFor(world.missionIndex);
+    }
+    if (input.mouse.clicked && buttonHit(input.mouse.clickX, input.mouse.clickY, canvas.width / 2 - 110, canvas.height * 0.42, 220, 44)) {
+      openPhoneFor(world.missionIndex);
+    }
+    return;
+  }
+  if (s === 'busted' || s === 'wasted') {
+    if (input.pressed('enter')) {
+      world.screen = 'playing';
+      audio.click();
+    }
+    if (input.mouse.clicked && buttonHit(input.mouse.clickX, input.mouse.clickY, canvas.width / 2 - 110, canvas.height * 0.42, 220, 44)) {
+      world.screen = 'playing';
+      audio.click();
+    }
+    return;
+  }
+  if (s === 'story') {
+    if (input.pressed('enter')) {
+      world.screen = 'playing';
+      audio.click();
+    }
+    if (input.mouse.clicked && buttonHit(input.mouse.clickX, input.mouse.clickY, canvas.width / 2 - 110, canvas.height * 0.44, 220, 44)) {
+      world.screen = 'playing';
+      audio.click();
+    }
+    return;
+  }
+}
 
-  function step() {
-    const dir = input.direction();
-    const keys = {
-      dx: dir.x, dy: dir.y,
-      action: input.action(), sprint: input.sprint(),
-      enter: pendingEnter,
-    };
-    pendingEnter = false;
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, keys, true);
+function step(dt) {
+  if (shotMode) {
+    stepShot(world, audio, dt);
+    return;
+  }
+  if (input.pressed('mute')) {
+    world.muted = audio.toggleMute();
+    saveGame(world);
+  }
+  if (world.screen === 'playing') {
+    if (input.pressed('pause')) {
+      world.screen = 'pause';
+      audio.click();
       return;
     }
-    const events = world.step(STEP, keys, false);
-    handleEvents(events);
-    const car = world.state.cars.find((c) => c.id === world.state.player.carId);
-    if (car) audio.engine(car.speed, car.spec.top);
-    else audio.engineOff();
-    const policeNear = world.state.wanted >= 2 && world.state.cars.some((c) => c.police
-      && Math.hypot(c.x - world.state.player.x, c.y - world.state.player.y) < 500);
-    audio.siren(policeNear, STEP);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
+    if (input.pressed('restart') && world.mission) {
+      openPhoneFor(world.mission.index);
+      return;
     }
-    const extra = screen === SCREEN_CARD ? { mission: cardMission }
-      : screen === SCREEN_TITLE ? { hasSave } : null;
-    renderer.draw(world, screen, best, extra);
+    updatePlaying(world, input, audio, dt);
+    applyPendingEvent();
+  } else {
+    handleScreenInput();
   }
+}
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  canvas.addEventListener('mousedown', () => audio.unlock());
-  announce('Solmar Bay. Press Enter to start.');
+let last = performance.now();
+let acc = 0;
+function frame(now) {
+  const elapsed = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  acc += elapsed;
+  let steps = 0;
+  while (acc >= CONFIG.step && steps < 5) {
+    step(CONFIG.step);
+    acc -= CONFIG.step;
+    steps++;
+    // Clear pressed-key edges after every step, not after every frame.
+    // Edges are consumed per step, so frame-level clearing both drops
+    // presses (a short frame can run zero steps) and double-fires them
+    // (two steps in one frame would both see the same press — Enter
+    // would enter the car and immediately exit it again).
+    input.endFrame();
+  }
+  if (steps === 5) acc = 0;
+  const view = cameraFor(world, canvas.width, canvas.height);
+  render(ctx, world, canvas.width, canvas.height, view);
+  if (shotMode && world.shotReady) {
+    window.__shotReady = true;
+    document.title = 'READY';
+  }
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+window.__solmar = {
+  world,
+  input,
+  audio,
+  startMission: (i) => openPhoneFor(i),
+  state: () => ({
+    screen: world.screen,
+    cash: Math.floor(world.cash),
+    wanted: world.wanted,
+    missionsDone: world.missionsDone.slice(),
+    health: Math.round(world.player.health),
+  }),
+};
+
+requestAnimationFrame(frame);

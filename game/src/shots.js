@@ -1,255 +1,177 @@
-// The screenshot scenes behind ?shot=1-finale|2-chase|3-pickup|4-steal.
-// Each one plays the real rules forward from a fresh world for a fixed
-// number of steps, steered by a simple autopilot, so the frame is what a
-// short game really looks like and the same seed always gives the same
-// frame. Every scene ends in a climactic moment: high wanted stars,
-// police in frame, cash popups floating, the objective on screen.
-//
-// The driving scenes run a big road-aligned rectangle, so the car holds
-// top speed on long straights and the police cars, which cut corners,
-// cannot pile onto it; the driver also reverses out if it ever gets
-// pinned. The on-foot scenes walk one way only, never back toward the
-// chasing officer: the officer trails behind at walking speed, closes
-// slowly, and is close in the final frame without ever touching the
-// player. Cash is laid on the middle of each straight, where the
-// autopilot really passes, so the score reads above zero.
-import { STEP } from './config.js';
-import { SCREEN_PLAY } from './render.js';
+// The autopilot that stages the four screenshots. Each scene runs the real
+// simulation forward from a fresh world with a scripted driver, paints
+// twice, then raises the ready flag the screenshot script waits for.
 
-function wrapAngle(a) {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
+import { CONFIG } from './config.js';
+import { createWorld, beginMission, updatePlaying, raiseWanted, syncPolice } from './world.js';
+
+const SHOT_DEFS = [
+  { id: '1-finale', name: 'Finale drive', mission: 4, wanted: 4, runSeconds: 20, stars: 4 },
+  { id: '2-chase', name: 'Five-star chase', mission: null, wanted: 5, runSeconds: 25, stars: 5 },
+  { id: '3-pickup', name: 'Mission pickup', mission: 3, wanted: 1, runSeconds: 15, stars: 1 },
+  { id: '4-steal', name: 'Street steal', mission: null, wanted: 2, runSeconds: 12, stars: 2 },
+];
+
+export function shotList() {
+  return SHOT_DEFS.map((s) => ({ id: s.id, name: s.name }));
 }
 
-function makeDriver(drift) {
-  let lastX = null;
-  let lastY = null;
-  let still = 0;
-  let reversing = 0;
-  return function drive(world, target) {
-    const p = world.state.player;
-    const car = world.state.cars.find((c) => c.id === p.carId);
-    if (!car) return { dx: 0, dy: 0, action: false, sprint: false, enter: false };
-    if (lastX !== null) {
-      if (Math.hypot(car.x - lastX, car.y - lastY) < 3 && Math.abs(car.speed) < 150) still += 1;
-      else still = 0;
-    }
-    lastX = car.x;
-    lastY = car.y;
-    if (still > 30) {
-      still = 0;
-      reversing = 45;
-    }
-    if (reversing > 0) {
-      reversing -= 1;
-      return { dx: -1, dy: 1, action: false, sprint: false, enter: false };
-    }
-    const want = Math.atan2(target.y - car.y, target.x - car.x);
-    const diff = wrapAngle(want - car.angle);
-    return {
-      dx: Math.max(-1, Math.min(1, diff * 2.5)),
-      dy: Math.abs(diff) > 1.1 ? 0 : -1,
-      action: drift && Math.abs(diff) > 0.35,
-      sprint: false,
-      enter: false,
-    };
+function makeDriver(w, waypoints) {
+  let wp = 0;
+  return {
+    update(input) {
+      const p = w.player;
+      const target = waypoints[Math.min(wp, waypoints.length - 1)];
+      if (!target) return { up: false, down: false, left: false, right: false, enter: false };
+      const d = Math.hypot(target.x - p.x, target.y - p.y);
+      if (d < 90 && wp < waypoints.length - 1) wp++;
+      const want = Math.atan2(target.y - p.y, target.x - p.x);
+      let diff = want - p.angle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      return {
+        up: true, down: false,
+        left: diff < -0.12, right: diff > 0.12,
+        enter: false,
+      };
+    },
   };
 }
 
-function walkToward(world, target) {
-  const p = world.state.player;
-  const dx = target.x - p.x;
-  const dy = target.y - p.y;
-  const d = Math.hypot(dx, dy) || 1;
-  return { dx: dx / d, dy: dy / d, action: false, sprint: d > 200, enter: false };
+function scriptedInput(driver) {
+  const state = driver.update();
+  return {
+    down(name) {
+      if (name === 'up') return !!state.up;
+      if (name === 'down') return !!state.down;
+      if (name === 'left') return !!state.left;
+      if (name === 'right') return !!state.right;
+      return false;
+    },
+    pressed() { return false; },
+    axisX() { return (state.right ? 1 : 0) - (state.left ? 1 : 0); },
+    axisY() { return (state.up ? -1 : 0) + (state.down ? 1 : 0); },
+    mouse: { x: 0, y: 0, clicked: false, clickX: 0, clickY: 0 },
+    endFrame() {},
+  };
 }
 
-function loopWaypoints(world, points, seconds, driver, wrap = true) {
-  let index = 0;
-  const steps = Math.floor(seconds / STEP);
-  for (let i = 0; i < steps; i += 1) {
-    const p = world.state.player;
-    if (Math.hypot(points[index].x - p.x, points[index].y - p.y) < 130) {
-      index = wrap ? (index + 1) % points.length : Math.min(index + 1, points.length - 1);
+function layCash(w, spots) {
+  for (const s of spots) w.pickups.push({ x: s[0], y: s[1], value: s[2], bob: 0 });
+}
+
+function layPopups(w, spots) {
+  for (const s of spots) w.popups.push({ x: s[0], y: s[1], text: s[2], life: 1.2 });
+}
+
+export function setupShot(seed, shotIndex) {
+  const def = SHOT_DEFS[shotIndex];
+  const w = createWorld(seed, null);
+  w.screen = 'playing';
+  w.cash = [60, 111, 89, 15][shotIndex];
+  w.earned = w.cash;
+  w.best = Math.max(w.best, 640);
+  const L = CONFIG.landmarks;
+  if (shotIndex === 0) {
+    w.missionsDone = [0, 1, 2, 3];
+    w.packagesCollected = 3;
+    w.carsStolen = 4;
+    beginMission(w, 4);
+    const falco = w.falcoCar;
+    falco.x = 1280; falco.y = 480; falco.angle = Math.PI / 2; falco.parked = false;
+    w.player.onFoot = false;
+    w.player.carId = falco.id;
+    w.player.x = falco.x; w.player.y = falco.y; w.player.angle = falco.angle;
+    falco.speed = 300;
+    w.ilsaAboard = true;
+    raiseWanted(w, 4);
+    layCash(w, [[1280, 510, 25], [1890, 1040, 25]]);
+    layPopups(w, [[1240, 460, '+25'], [1330, 520, '+25']]);
+    w.driver = makeDriver(w, [{ x: 1280, y: 960 }, { x: 1600, y: 1280 }, { x: 2048, y: 1600 }]);
+    w.runSeconds = 20;
+  } else if (shotIndex === 1) {
+    w.missionsDone = [0, 1, 2, 3];
+    w.packagesCollected = 2;
+    w.carsStolen = 3;
+    const comet = w.cars.find((c) => c.type === 'comet' && c.parked);
+    if (comet) {
+      comet.x = 1280; comet.y = 640; comet.angle = 0; comet.parked = false;
+      w.player.onFoot = false;
+      w.player.carId = comet.id;
+      w.player.x = comet.x; w.player.y = comet.y; w.player.angle = 0;
+      comet.speed = 320;
     }
-    world.step(STEP, driver(world, points[index]), false);
-  }
-}
-
-function layCash(world, spots) {
-  for (const [x, y, value] of spots) {
-    world.state.pickups.push({ x, y, value });
-  }
-}
-
-function pushOfficersBack(world, x, y) {
-  for (const off of world.state.officers) {
-    off.x = x;
-    off.y = y;
-  }
-}
-
-function finishDrive(world, seconds) {
-  const state = world.state;
-  const car = state.cars.find((c) => c.id === state.player.carId);
-  if (!car) return;
-  const horizontal = Math.abs(Math.cos(car.angle)) > Math.abs(Math.sin(car.angle));
-  const dir = horizontal ? (Math.cos(car.angle) >= 0 ? 1 : -1) : (Math.sin(car.angle) >= 0 ? 1 : -1);
-  const road = (v) => Math.round(v / 320) * 320;
-  if (horizontal) {
-    car.y = road(car.y);
-    car.angle = dir > 0 ? 0 : Math.PI;
-    const cornerX = dir > 0 ? Math.ceil((car.x + 1) / 320) * 320 : Math.floor((car.x - 1) / 320) * 320;
-    if (Math.abs(cornerX - car.x) < 500) car.x = cornerX - dir * 500;
+    raiseWanted(w, 5);
+    layCash(w, [[1240, 600, 25], [1400, 700, 10]]);
+    layPopups(w, [[1260, 600, '+25'], [1420, 720, 'COMBO x2']]);
+    w.driver = makeDriver(w, [{ x: 1600, y: 640 }, { x: 1600, y: 960 }, { x: 1280, y: 960 }]);
+    w.runSeconds = 25;
+  } else if (shotIndex === 2) {
+    w.missionsDone = [0, 1, 2];
+    w.packagesCollected = 1;
+    w.carsStolen = 2;
+    beginMission(w, 3);
+    w.player.x = 1900; w.player.y = 1470; w.player.angle = -Math.PI / 2;
+    raiseWanted(w, 1);
+    layCash(w, [[1860, 1440, 10]]);
+    layPopups(w, [[1880, 1420, '+10']]);
+    w.driver = makeDriver(w, [{ x: 1216, y: 288 }]);
+    w.onFootDriver = true;
+    w.runSeconds = 15;
   } else {
-    car.x = road(car.x);
-    car.angle = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
-    const cornerY = dir > 0 ? Math.ceil((car.y + 1) / 320) * 320 : Math.floor((car.y - 1) / 320) * 320;
-    if (Math.abs(cornerY - car.y) < 500) car.y = cornerY - dir * 500;
+    w.missionsDone = [0];
+    w.packagesCollected = 0;
+    w.carsStolen = 1;
+    w.player.x = 640; w.player.y = 700; w.player.angle = Math.PI / 2;
+    raiseWanted(w, 2);
+    const comet = w.cars.find((c) => c.type === 'comet' && c.parked);
+    if (comet) { comet.x = 700; comet.y = 700; comet.angle = Math.PI / 2; }
+    const cab = w.cars.find((c) => c.type === 'suncab' && c.parked);
+    if (cab) { cab.x = 576; cab.y = 700; cab.angle = Math.PI / 2; }
+    layCash(w, [[620, 660, 10]]);
+    layPopups(w, [[640, 640, '+10']]);
+    w.driver = makeDriver(w, [{ x: 640, y: 960 }]);
+    w.onFootDriver = true;
+    w.runSeconds = 12;
   }
-  car.speed = car.spec.top;
-  state.player.x = car.x;
-  state.player.y = car.y;
-  state.player.angle = car.angle;
-  let i = 0;
-  for (const pc of state.cars) {
-    if (!pc.police) continue;
-    const back = 200 + i * 60;
-    const side = i % 2 === 0 ? 34 : -34;
-    if (horizontal) {
-      pc.x = car.x - dir * back;
-      pc.y = car.y + side;
-    } else {
-      pc.x = car.x + side;
-      pc.y = car.y - dir * back;
-    }
-    pc.angle = car.angle;
-    pc.speed = 480;
-    i += 1;
+  w.shotDef = def;
+  w.shotElapsed = 0;
+  w.shotReady = false;
+  return w;
+}
+
+export function stepShot(w, audio, dt) {
+  if (w.shotReady) return;
+  const input = w.onFootDriver ? scriptedFootInput(w) : scriptedInput(w.driver);
+  updatePlaying(w, input, audio, dt);
+  // Hold the staged heat: the real simulation decays wanted to zero while
+  // the driver runs unseen, which would leave empty stars and no police in
+  // the shot. Restoring it also re-syncs the pursuit cars to match.
+  if (w.wanted !== w.shotDef.wanted) {
+    w.wanted = w.shotDef.wanted;
+    syncPolice(w);
   }
-  for (const other of state.cars) {
-    if (other === car || other.police) continue;
-    if (Math.hypot(other.x - car.x, other.y - car.y) < 160) {
-      if (horizontal) {
-        other.x = car.x - dir * 900;
-        other.y = car.y + 60;
-      } else {
-        other.x = car.x + 60;
-        other.y = car.y - dir * 900;
-      }
-    }
-  }
-  const driver = makeDriver(false);
-  const steps = Math.floor(seconds / STEP);
-  for (let s = 0; s < steps; s += 1) {
-    const target = horizontal
-      ? { x: car.x + dir * 1000, y: car.y }
-      : { x: car.x, y: car.y + dir * 1000 };
-    world.step(STEP, driver(world, target), false);
-  }
-  for (const other of state.cars) {
-    if (other === car || other.police) continue;
-    if (Math.hypot(other.x - car.x, other.y - car.y) < 120) {
-      if (horizontal) {
-        other.x = car.x - dir * 900;
-        other.y = car.y + 60;
-      } else {
-        other.x = car.x + 60;
-        other.y = car.y - dir * 900;
-      }
-    }
+  // Keep the staged floating score popups alive until the capture; their
+  // 1.2s life would otherwise expire long before the run ends.
+  for (const pp of w.popups) pp.life = Math.max(pp.life, 0.5);
+  w.shotElapsed += dt;
+  if (w.shotElapsed >= w.runSeconds) {
+    w.shotReady = true;
   }
 }
 
-export function stageShot(name, world) {
-  const state = world.state;
-  if (name === '2-chase') {
-    world.reset();
-    world.startMission(2);
-    world.raiseWanted(2);
-    const car = state.cars.find((c) => c.kind === 'comet' && c.parked);
-    car.parked = false;
-    car.health = 100000;
-    car.x = 1280;
-    car.y = 1280;
-    car.angle = 0;
-    car.speed = 200;
-    state.player.onFoot = false;
-    state.player.carId = car.id;
-    state.player.x = car.x;
-    state.player.y = car.y;
-    state.marker = { x: 1280, y: 480, label: 'Lose the police' };
-    layCash(world, [
-      [1280, 450, 25], [1280, 480, 25], [1280, 510, 25],
-      [1890, 1040, 25], [1920, 1040, 25], [1950, 1040, 25],
-      [1280, 1570, 25], [1280, 1600, 25], [1280, 1630, 25],
-      [610, 1040, 25], [640, 1040, 25], [670, 1040, 25],
-    ]);
-    loopWaypoints(world, [
-      { x: 1920, y: 1280 }, { x: 1920, y: 1600 }, { x: 640, y: 1600 }, { x: 640, y: 480 }, { x: 1920, y: 480 },
-    ], 20, makeDriver(true));
-    finishDrive(world, 1.5);
-    return { screen: SCREEN_PLAY, best: state.score };
-  }
-  if (name === '3-pickup') {
-    world.reset();
-    world.startMission(3);
-    state.player.x = 2180;
-    state.player.y = 1740;
-    state.player.angle = 0;
-    state.wanted = 1;
-    state.wantedFloor = 1;
-    world.spawnPolice(1);
-    pushOfficersBack(world, 2400, 1600);
-    state.marker = { x: 2200, y: 1750, label: 'Package 1/3' };
-    layCash(world, [[1800, 1600, 25], [1400, 1600, 15]]);
-    loopWaypoints(world, [
-      { x: 2100, y: 1700 }, { x: 2000, y: 1600 }, { x: 1800, y: 1600 }, { x: 1600, y: 1600 },
-      { x: 1400, y: 1600 }, { x: 1200, y: 1600 }, { x: 1000, y: 1600 }, { x: 800, y: 1600 }, { x: 640, y: 1600 },
-    ], 7, (w, t) => walkToward(w, t), false);
-    return { screen: SCREEN_PLAY, best: state.score };
-  }
-  if (name === '4-steal') {
-    world.reset();
-    world.startMission(1);
-    state.player.x = 700;
-    state.player.y = 960;
-    state.player.angle = 0;
-    state.wanted = 1;
-    state.wantedFloor = 1;
-    world.spawnPolice(1);
-    pushOfficersBack(world, 400, 960);
-    state.marker = { x: 900, y: 960, label: 'Stealable Comet' };
-    layCash(world, [[700, 880, 25], [1000, 800, 15], [1100, 880, 25]]);
-    loopWaypoints(world, [
-      { x: 700, y: 800 }, { x: 900, y: 800 }, { x: 1100, y: 800 }, { x: 1100, y: 960 }, { x: 900, y: 960 },
-    ], 7, (w, t) => walkToward(w, t), false);
-    return { screen: SCREEN_PLAY, best: state.score };
-  }
-  world.reset();
-  world.startMission(4);
-  const falco = state.cars.find((c) => c.kind === 'falco');
-  falco.parked = false;
-  falco.health = 100000;
-  falco.x = 1100;
-  falco.y = 480;
-  falco.angle = 0;
-  falco.speed = 300;
-  state.player.onFoot = false;
-  state.player.carId = falco.id;
-  state.player.x = falco.x;
-  state.player.y = falco.y;
-  state.marker = { x: 2048, y: 1890, label: 'Marina boat' };
-  layCash(world, [
-    [1280, 450, 25], [1280, 480, 25], [1280, 510, 25],
-    [1890, 1040, 25], [1920, 1040, 25], [1950, 1040, 25],
-    [1280, 1570, 25], [1280, 1600, 25], [1280, 1630, 25],
-    [610, 1040, 25], [640, 1040, 25], [670, 1040, 25],
-  ]);
-  loopWaypoints(world, [
-    { x: 1920, y: 480 }, { x: 1920, y: 1600 }, { x: 640, y: 1600 }, { x: 640, y: 480 },
-  ], 15, makeDriver(false));
-  finishDrive(world, 1.5);
-  return { screen: SCREEN_PLAY, best: state.score };
+function scriptedFootInput(w) {
+  const p = w.player;
+  const target = w.mission && w.mission.target ? w.mission.target : { x: p.x + 100, y: p.y };
+  const d = Math.hypot(target.x - p.x, target.y - p.y);
+  const want = Math.atan2(target.y - p.y, target.x - p.x);
+  const moving = d > 40;
+  return {
+    down(name) { return false; },
+    pressed() { return false; },
+    axisX() { return moving ? Math.cos(want) : 0; },
+    axisY() { return moving ? Math.sin(want) : 0; },
+    mouse: { x: 0, y: 0, clicked: false, clickX: 0, clickY: 0 },
+    endFrame() {},
+  };
 }

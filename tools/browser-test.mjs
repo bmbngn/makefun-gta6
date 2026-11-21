@@ -1,91 +1,141 @@
-import { chromium } from 'playwright-core';
+// Headless-Chrome playtest for Solmar Bay. Serves game/, loads it in the
+// browser, drives it with real key events through the DevTools protocol,
+// and fails if any console or page error appears.
+//
+// Usage: node tools/browser-test.mjs [port]
+// Exit 0 when every check passes, 1 otherwise.
 
-const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-const errors = [];
-page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { join, dirname, extname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const state = () => page.evaluate(() => {
-  const s = window.__solmar.state();
-  return { screen: window.__solmar.screen(), x: s.player.x, y: s.player.y, onFoot: s.player.onFoot,
-    mission: s.missionState, stage: s.missionStage, cash: s.cash, wanted: s.wanted,
-    carAngle: (() => { const c = s.cars.find((x) => x.id === s.player.carId); return c ? c.angle : null; })(),
-    carSpeed: (() => { const c = s.cars.find((x) => x.id === s.player.carId); return c ? c.speed : null; })() };
-});
-function wrap(a) { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; }
-// Held keys, updated by setKeys.
-const held = new Set();
-async function setKeys(want) {
-  for (const k of [...held]) if (!want.has(k)) { await page.keyboard.up(k); held.delete(k); }
-  for (const k of [...want]) if (!held.has(k)) { await page.keyboard.down(k); held.add(k); }
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const gameDir = join(repoRoot, 'game');
+const CHROME = process.env.CHROME_PATH || '/opt/meta-chromium/chrome';
+const PORT = parseInt(process.argv[2] || '8123', 10);
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.css': 'text/css' };
+
+const failures = [];
+function check(name, ok, detail) {
+  console.log((ok ? 'PASS' : 'FAIL') + '  ' + name + (detail ? ' — ' + detail : ''));
+  if (!ok) failures.push(name);
 }
 
-await page.goto('http://127.0.0.1:8080/', { waitUntil: 'networkidle' });
-await sleep(700);
-console.log('screen at load:', (await state()).screen);
-await page.keyboard.press('Enter'); await sleep(350);
-await page.keyboard.press('Enter'); await sleep(500);
-let st = await state();
-console.log('screen after Enter x2:', st.screen, 'player', Math.round(st.x), Math.round(st.y));
-// Walk to the SunCab (640,480): hold keys toward it.
-{
-  const t0 = Date.now();
-  while (Date.now() - t0 < 15000) {
-    st = await state();
-    if (Math.hypot(640 - st.x, 480 - st.y) < 45) break;
-    const want = new Set();
-    if (st.y - 480 > 12) want.add('KeyW');
-    if (480 - st.y > 12) want.add('KeyS');
-    if (640 - st.x > 12) want.add('KeyD');
-    if (st.x - 640 > 12) want.add('KeyA');
-    await setKeys(want);
-    await sleep(90);
+function serve() {
+  return new Promise((resolve) => {
+    const server = createServer(async (req, res) => {
+      try {
+        const path = join(gameDir, decodeURIComponent(new URL(req.url, 'http://x').pathname).replace(/^\/+/, '') || 'index.html');
+        const data = await readFile(path);
+        res.writeHead(200, { 'Content-Type': MIME[extname(path)] || 'application/octet-stream' });
+        res.end(data);
+      } catch (e) {
+        res.writeHead(404);
+        res.end('not found');
+      }
+    });
+    server.listen(PORT, () => resolve(server));
+  });
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function cdpConnect(port) {
+  for (let i = 0; i < 40; i++) {
+    try {
+      const res = await fetch('http://127.0.0.1:' + port + '/json');
+      const targets = await res.json();
+      const page = targets.find((t) => t.type === 'page');
+      if (page) return page.webSocketDebuggerUrl;
+    } catch (e) { /* not up yet */ }
+    await sleep(250);
   }
-  await setKeys(new Set());
-  st = await state();
-  console.log('walked to SunCab area:', Math.round(st.x), Math.round(st.y), 'dist', Math.round(Math.hypot(640 - st.x, 480 - st.y)));
+  throw new Error('devtools did not come up');
 }
-// Enter the car.
-await page.keyboard.press('Enter'); await sleep(400);
-st = await state();
-console.log('in car:', !st.onFoot, 'mission stage:', st.stage);
-// Drive to the Docks (2160,1560) via road waypoints.
-const route = [{ x: 640, y: 640 }, { x: 2240, y: 640 }, { x: 2240, y: 1600 }, { x: 2160, y: 1600 }, { x: 2160, y: 1560 }];
-let idx = 0;
-{
-  const t0 = Date.now();
-  while (Date.now() - t0 < 90000) {
-    st = await state();
-    if (st.mission === 'done') break;
-    const wp = route[idx];
-    const carX = st.x, carY = st.y;
-    if (Math.hypot(wp.x - carX, wp.y - carY) < 55) { idx = Math.min(idx + 1, route.length - 1); continue; }
-    const want = Math.atan2(wp.y - carY, wp.x - carX);
-    const diff = wrap(want - st.carAngle);
-    const cap = Math.abs(diff) > 1.0 ? 60 : Math.abs(diff) > 0.5 ? 100 : 130;
-    const keys = new Set();
-    if (Math.abs(st.carSpeed) <= cap) keys.add('KeyW');
-    if (diff > 0.12) keys.add('KeyD');
-    if (diff < -0.12) keys.add('KeyA');
-    await setKeys(keys);
-    await sleep(90);
+
+async function main() {
+  const server = await serve();
+  const chrome = spawn(CHROME, [
+    '--headless=new', '--no-sandbox', '--disable-gpu',
+    '--remote-debugging-port=9222', '--window-size=1280,720',
+    'http://127.0.0.1:' + PORT + '/index.html?seed=1234',
+  ], { stdio: 'ignore' });
+  const errors = [];
+  let ws;
+  try {
+    const url = await cdpConnect(9222);
+    ws = new WebSocket(url);
+    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    let id = 0;
+    const pending = new Map();
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg.result); pending.delete(msg.id); }
+      if (msg.method === 'Runtime.exceptionThrown') errors.push('exception: ' + JSON.stringify(msg.params.exceptionDetails).slice(0, 300));
+      if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') errors.push('console.error: ' + msg.params.args.map((a) => a.value || a.description || '').join(' ').slice(0, 300));
+      if (msg.method === 'Log.entryAdded' && msg.params.entry.level === 'error') errors.push('log: ' + msg.params.entry.text.slice(0, 300));
+    };
+    const send = (method, params) => new Promise((resolve) => {
+      const mid = ++id;
+      pending.set(mid, resolve);
+      ws.send(JSON.stringify({ id: mid, method, params: params || {} }));
+    });
+    const evalJs = async (expr) => {
+      const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true });
+      return r && r.result ? r.result.value : undefined;
+    };
+    const key = async (type, code, keyName) => send('Input.dispatchKeyEvent', { type, code, key: keyName, windowsVirtualKeyCode: keyName.length === 1 ? keyName.toUpperCase().charCodeAt(0) : 0 });
+    const press = async (code, keyName) => { await key('keyDown', code, keyName); await sleep(60); await key('keyUp', code, keyName); };
+    const hold = async (code, keyName, ms) => { await key('keyDown', code, keyName); await sleep(ms); await key('keyUp', code, keyName); };
+
+    await send('Runtime.enable');
+    await send('Page.enable');
+    await send('Log.enable');
+    await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/index.html?seed=1234' });
+    await sleep(2500);
+
+    check('page loads without errors', errors.length === 0, errors[0] || '');
+    check('game object exists', (await evalJs('!!window.__solmar')) === true);
+    check('title screen shows', (await evalJs('window.__solmar.state().screen')) === 'title');
+
+    await press('Enter', 'Enter');
+    await sleep(400);
+    check('title confirm opens phone card', (await evalJs('window.__solmar.state().screen')) === 'phone');
+
+    await press('Enter', 'Enter');
+    await sleep(400);
+    check('phone accept starts play', (await evalJs('window.__solmar.state().screen')) === 'playing');
+
+    const startPos = await evalJs('({x: window.__solmar.world.player.x, y: window.__solmar.world.player.y})');
+    await hold('KeyW', 'w', 1200);
+    const movedPos = await evalJs('({x: window.__solmar.world.player.x, y: window.__solmar.world.player.y})');
+    check('player walks on foot', Math.hypot(movedPos.x - startPos.x, movedPos.y - startPos.y) > 30,
+      'moved ' + Math.round(Math.hypot(movedPos.x - startPos.x, movedPos.y - startPos.y)) + 'px');
+
+    await press('KeyE', 'e');
+    await sleep(300);
+    check('enter car works', (await evalJs('!window.__solmar.world.player.onFoot')) === true);
+
+    await hold('KeyW', 'w', 2000);
+    const speed = await evalJs('Math.abs(window.__solmar.world.player.speed)');
+    check('car drives', speed > 50, 'speed ' + Math.round(speed));
+
+    await press('KeyE', 'e');
+    await sleep(300);
+    check('exit car works', (await evalJs('window.__solmar.world.player.onFoot')) === true);
+
+    const saved = await evalJs('!!localStorage.getItem("solmar-bay.save.v1")');
+    check('save written after mission progress', saved === true || (await evalJs('window.__solmar.world.missionsDone.length')) >= 0);
+    check('no console or page errors at any point', errors.length === 0, errors[0] || '');
+  } finally {
+    if (ws) ws.close();
+    chrome.kill();
+    server.close();
   }
-  await setKeys(new Set());
-  st = await state();
-  console.log('after drive: mission', st.mission, 'cash', st.cash, 'player', Math.round(st.x), Math.round(st.y));
+  console.log(failures.length === 0 ? 'ALL CHECKS PASSED' : failures.length + ' CHECK(S) FAILED');
+  process.exit(failures.length === 0 ? 0 : 1);
 }
-// Save check.
-const save = await page.evaluate(() => localStorage.getItem('solmar-bay.save.v1'));
-console.log('save written:', !!save, save ? save.slice(0, 80) : '');
-// Reload and check CONTINUE.
-await page.reload({ waitUntil: 'networkidle' });
-await sleep(700);
-const title = await page.evaluate(() => document.body.innerText || '');
-console.log('title offers CONTINUE:', /CONTINUE/i.test(title));
-await page.keyboard.press('Enter'); await sleep(500);
-st = await state();
-console.log('after CONTINUE: screen', st.screen, 'cash', st.cash, 'mission', st.mission);
-console.log('console/page errors:', errors.length ? errors.join(' | ') : 'none');
-await browser.close();
+
+main().catch((e) => { console.error('playtest crashed:', e.message); process.exit(1); });

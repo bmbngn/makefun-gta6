@@ -1,2 +1,4 @@
+node_modules/
 tools/node_modules
 out/
+.DS_Store

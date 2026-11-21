@@ -1,48 +1,50 @@
 # Solmar Bay
 
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/bmbngn/makefun-gta6/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/bmbngn/makefun-gta6/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
+[![rank](https://make.fun/badge/gta6-01/bmbngn/makefun-gta6/rank.svg)](https://make.fun/bounty/gta6-01)
+[![reward](https://make.fun/badge/gta6-01/bmbngn/makefun-gta6/reward.svg)](https://make.fun/bounty/gta6-01)
 
-Solmar Bay — 5 districts, 5 story missions, 4 stealable cars, 5-star wanted, traffic, police chases, minimap. An open-world crime game in a sun-soaked coastal city, playable in a desktop browser from static files with no network request.
+An original open-world crime game for make.fun's GTA 6 bounty: **5 districts, 5 story missions, 4 stealable cars, 5-star wanted, traffic, police chases, minimap**.
 
-Dana Reyes owes the Harbor Crew. Fixer Sal Marin hands out the jobs by phone card, crew boss Ilsa Kade rides along on the last one, and rival Vince Torro keeps tipping off the police. Five jobs: a pickup run, a stolen Falco GT and a respray, losing a three-star heat, a timed three-package getaway, and a four-star drive to the Marina boat. After the fifth job the debt is paid and free roam continues.
+Dana Reyes, an ex-courier driver, owes money to the Harbor Crew. Fixer Sal Marin hands out the jobs by phone card; crew boss Ilsa Kade wants the debt worked off job by job. Drive, steal, hide from the police, and finish all five jobs to clear the debt.
 
 ## How to play
 
-- **Move:** WASD or arrows — walk on foot, drive in a car
-- **Enter / exit a car:** Enter (stealing a car in sight raises your wanted level)
-- **Punch / handbrake:** Space — punch on foot, drift while driving
-- **Sprint:** Shift on foot
-- **Pause:** P or Esc · **Mute:** M · **Retry mission:** R · **Menus:** Enter or click
-- **Wanted:** stars rise when you steal a car in sight, hit a pedestrian, or hit the police. Stay out of sight and they decay; the safehouse halves the wait, and a respray at the paint shop clears them all for $100.
-- **Busted / wasted:** lose 10% of your cash and wake up at the police station or the hospital.
-- **Save:** the game saves on every completed mission. Your best score is kept in this browser.
+Serve the game and open it in a desktop browser:
 
-## Run it
-
-```sh
+```
 node serve.ts
 ```
 
-then open http://localhost:8080. Or serve `game/` with any static server.
+Then open http://localhost:8080 and play with keyboard and mouse. No network, no build step — `game/` is plain static files.
 
-## What is in here
+| Key | Action |
+| --- | ------ |
+| WASD / Arrows | Move on foot, drive |
+| E | Enter / exit a car, confirm |
+| F | Punch |
+| Shift | Sprint on foot |
+| Space | Handbrake / drift |
+| P / Esc | Pause |
+| M | Mute |
+| R | Restart mission |
 
-- `main.ts` — the entry program: copies `game/` and `screenshots/` to the output and writes `dossier.json` (make.fun gta6-01)
-- `game/index.html` — the page, one canvas
-- `game/src/config.js` — every tuning number and colour, the five districts, the four vehicle types, the five mission scripts and the story
-- `game/src/city.js` — the city: roads, blocks, buildings, parks, beach, pier, and the named places
-- `game/src/world.js` — the rules: the player, vehicles, traffic, pedestrians, police, wanted level, missions, combat, economy and save
-- `game/src/input.js` — keyboard and mouse input
-- `game/src/audio.js` — synthesised WebAudio sounds and music (no audio files)
-- `game/src/render.js` — the city, the cars, the HUD with WIN/LOSE lines, the minimap and every screen
-- `game/src/shots.js` — the autopilot that stages the screenshots
-- `game/src/main.js` — the game loop and the screens
-- `screenshots/` — 1-finale, 2-chase, 3-pickup, 4-steal, real renders of the game
+## What is inside
 
-Everything is original: the idea, the city, the art, the sounds and the names. No copyrighted material, no network requests, no libraries.
+- A 2560×1920 sun-soaked coastal city: Downtown, Old Town, the Docks, the Marina and Beach, and the Hills, with a central plaza, parks, a pier and docks cranes.
+- Five story missions with phone-card briefings, objective markers, a 150-second getaway timer, and a 4-star finale drive with Ilsa Kade aboard.
+- Four stealable cars (SunCab, Comet, Falco GT, Mule) plus police patrol cars, 14 traffic cars and 24 pedestrians.
+- A 0–5 star wanted level with police chases, ramming patrol cars, foot officers, heat decay while unseen, a safehouse and a paint-shop respray.
+- A dense HUD: health, cash, big score + best, wanted stars with WIN/LOSE lines, progress list, objective line, minimap, speed and a controls strip.
+- Synthesised WebAudio only: engine hum, sirens, crash and punch sounds, pickup chimes, mission jingles and a bass-and-hats music loop.
+- Save to local storage (cash, missions, best score) with Continue / New Game on the title screen.
 
----
+## Files
 
-<sub>Entered on [make.fun](https://make.fun/?ref=escmq3aq&utm_source=github&utm_medium=readme&utm_campaign=gta6-01) · AI agents build software for cash rewards</sub>
+- `main.ts` — the entry program: copies `game/` and `screenshots/` to the output directory and writes the dossier with the vendored make.fun library.
+- `game/index.html` — one full-window canvas, one module script.
+- `game/src/` — one clear job per file: `config.js` (tuning, districts, vehicles, missions), `city.js` (city generation), `world.js` (rules), `input.js`, `audio.js`, `render.js`, `shots.js` (screenshot autopilot), `main.js` (boot and loop), `random.js` (seeded generator).
+- `screenshots/` — four renders of the game in headless Chrome at seed 1234.
+- `tools/` — `browser-test.mjs` (headless playtest) and `shoot.mjs` (screenshot capture).
+
+All city, character, vehicle, place and story names are invented for this game. Nothing comes from Rockstar Games or any other commercial game.

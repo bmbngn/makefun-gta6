@@ -1,173 +1,156 @@
-// The city of Solmar Bay, built once from the seed: roads on a grid,
-// blocks filled with buildings, two parks, a plaza, the beach and the
-// sea, the pier, and the named places missions use. Everything the rules
-// need to ask the city lives here: what is road, what blocks movement,
-// what a district is called, and whether one point can see another.
-import { WORLD, ROAD_GAP, ROAD_HALF, WALK_HALF, SEA_TOP, SAND_TOP, PALETTE } from './config.js';
+// City generation: roads, blocks, buildings, parks, beach, pier and
+// landmarks, all from the seeded generator in random.js.
 
-const LINES_X = [];
-for (let x = 0; x <= WORLD.width; x += ROAD_GAP) LINES_X.push(x);
-const LINES_Y = [];
-for (let y = 0; y <= WORLD.height; y += ROAD_GAP) LINES_Y.push(y);
+import { CONFIG } from './config.js';
 
-export function districtAt(x, y) {
-  if (y >= SAND_TOP) return 'Marina';
-  if (x >= 1920 && y >= 1280) return 'Docks';
-  if (x >= 960 && x < 1600 && y < 640) return 'Downtown';
-  if (x >= 1920 && y < 1280) return 'Hills';
-  return 'Old Town';
+function roadCenters() {
+  const list = [];
+  for (let v = 0; v <= CONFIG.worldWidth; v += CONFIG.roadEvery) list.push(v);
+  return list;
 }
 
-function nearestLine(value, lines) {
-  let best = lines[0];
-  let bestD = Math.abs(value - lines[0]);
-  for (const line of lines) {
-    const d = Math.abs(value - line);
-    if (d < bestD) {
-      bestD = d;
-      best = line;
-    }
+function blockRanges() {
+  const centers = roadCenters();
+  const ranges = [];
+  for (let i = 0; i < centers.length - 1; i++) {
+    ranges.push({ from: centers[i] + CONFIG.roadWidth / 2 + CONFIG.sidewalk, to: centers[i + 1] - CONFIG.roadWidth / 2 - CONFIG.sidewalk });
   }
-  return { line: best, dist: bestD };
+  return ranges;
 }
 
-export function onRoad(x, y) {
-  return nearestLine(x, LINES_X).dist <= ROAD_HALF || nearestLine(y, LINES_Y).dist <= ROAD_HALF;
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-export function onWalkable(x, y) {
-  if (y >= SEA_TOP) return false;
-  return nearestLine(x, LINES_X).dist <= WALK_HALF || nearestLine(y, LINES_Y).dist <= WALK_HALF;
+function insideRect(x, y, r) {
+  return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
 
-export function roadPointNear(rng, x, y) {
-  const lx = nearestLine(x, LINES_X).line;
-  const ly = nearestLine(y, LINES_Y).line;
-  if (rng.chance(0.5)) return { x: lx + rng.range(-ROAD_HALF + 10, ROAD_HALF - 10), y: Math.max(40, Math.min(WORLD.height - 40, y + rng.range(-160, 160))) };
-  return { x: Math.max(40, Math.min(WORLD.width - 40, x + rng.range(-160, 160))), y: ly + rng.range(-ROAD_HALF + 10, ROAD_HALF - 10) };
-}
-
-export function createCity(rng) {
+export function generateCity(rng) {
+  const xs = blockRanges();
+  const ys = blockRanges();
   const buildings = [];
-  const trees = [];
-  const parks = [];
-  const cranes = [];
-  const plaza = { x: 1120, y: 160, w: 320, h: 320 };
-  const parksAt = [
-    { x: 376, y: 696, w: 208, h: 208 },
-    { x: 1976, y: 376, w: 208, h: 208 },
+  const parks = [
+    { x: 96, y: 96, w: 192, h: 192, trees: 14 },
+    { x: 1888, y: 96, w: 192, h: 192, trees: 14 },
   ];
-  for (const p of parksAt) parks.push(p);
+  const noBuild = [
+    { x: CONFIG.landmarks.plaza.x - 32, y: CONFIG.landmarks.plaza.y - 32, w: CONFIG.landmarks.plaza.w + 64, h: CONFIG.landmarks.plaza.h + 64 },
+    { x: CONFIG.landmarks.marinaLot.x - 16, y: CONFIG.landmarks.marinaLot.y - 16, w: CONFIG.landmarks.marinaLot.w + 32, h: CONFIG.landmarks.marinaLot.h + 32 },
+    ...parks.map((p) => ({ x: p.x - 16, y: p.y - 16, w: p.w + 32, h: p.h + 32 })),
+  ];
 
-  function isParkBlock(cx, cy) {
-    return parksAt.some((p) => cx > p.x - 20 && cx < p.x + p.w + 20 && cy > p.y - 20 && cy < p.y + p.h + 20);
-  }
-  function isPlazaBlock(cx, cy) {
-    return cx > plaza.x - 20 && cx < plaza.x + plaza.w + 20 && cy > plaza.y - 20 && cy < plaza.y + plaza.h + 20;
-  }
-
-  const safehouse = { x: 420, y: 420, w: 96, h: 72 };
-  const paintShop = { x: 2020, y: 1420, w: 120, h: 80 };
-  const policeStation = { x: 1300, y: 100, w: 110, h: 76 };
-  const hospital = { x: 180, y: 700, w: 110, h: 76 };
-  const marinaLot = { x: 1980, y: 1640, w: 260, h: 120 };
-  const pier = { x: 2016, y: SAND_TOP, w: 64, h: WORLD.height - SAND_TOP };
-  const boat = { x: 2048, y: 1890 };
-  const named = [safehouse, paintShop, policeStation, hospital, marinaLot, pier];
-  function hitsNamed(bx, by, bw, bh) {
-    return named.some((n) => bx < n.x + n.w && bx + bw > n.x && by < n.y + n.h && by + bh > n.y);
-  }
-
-  for (let bi = 0; bi < LINES_X.length - 1; bi += 1) {
-    for (let bj = 0; bj < LINES_Y.length - 1; bj += 1) {
-      const x0 = LINES_X[bi] + WALK_HALF;
-      const y0 = LINES_Y[bj] + WALK_HALF;
-      const x1 = LINES_X[bi + 1] - WALK_HALF;
-      const y1 = LINES_Y[bj + 1] - WALK_HALF;
-      const cx = (x0 + x1) / 2;
-      const cy = (y0 + y1) / 2;
-      if (y0 >= SAND_TOP) continue;
-      if (isPlazaBlock(cx, cy)) continue;
-      if (isParkBlock(cx, cy)) {
-        const n = rng.int(6, 10);
-        for (let i = 0; i < n; i += 1) {
-          trees.push({ x: rng.range(x0 + 14, x1 - 14), y: rng.range(y0 + 14, y1 - 14), r: rng.range(7, 12) });
-        }
-        continue;
-      }
-      const district = districtAt(cx, cy);
-      const tall = district === 'Downtown';
-      const warehouse = district === 'Docks';
-      const house = district === 'Hills';
-      const count = tall ? 2 : warehouse ? 1 : house ? rng.int(2, 3) : rng.int(2, 4);
-      const bw = (x1 - x0) / (count === 1 ? 1 : 2);
-      const bh = (y1 - y0) / (count <= 2 ? 1 : 2);
-      for (let i = 0; i < count; i += 1) {
-        const gx = count === 1 ? 0 : i % 2;
-        const gy = count <= 2 ? 0 : Math.floor(i / 2);
-        const w = Math.max(46, bw - 26);
-        const h = Math.max(46, bh - 26);
-        const bx = x0 + gx * bw + 13;
-        const by = y0 + gy * bh + 13;
-        if (hitsNamed(bx, by, w, h)) continue;
-        buildings.push({
-          x: bx, y: by, w, h,
-          roof: rng.pick(PALETTE.buildingRoof),
-          tall: tall ? rng.int(2, 4) : 1,
-          warehouse,
-          house,
-          district,
-        });
-      }
-      if (district === 'Hills' && rng.chance(0.6)) {
-        trees.push({ x: rng.range(x0 + 20, x1 - 20), y: rng.range(y0 + 20, y1 - 20), r: rng.range(7, 11) });
+  for (const xr of xs) {
+    for (const yr of ys) {
+      if (yr.from >= CONFIG.beachTop) continue;
+      const blockW = xr.to - xr.from;
+      const blockH = yr.to - yr.from;
+      if (blockW < 80 || blockH < 80) continue;
+      const zone = { x: xr.from, y: yr.from, w: blockW, h: blockH };
+      if (noBuild.some((z) => rectsOverlap(zone, z))) continue;
+      const district = CONFIG.districts.find((d) => insideRect(xr.from + blockW / 2, yr.from + blockH / 2, d)) || CONFIG.districts[1];
+      const count = rng.int(1, 2);
+      for (let i = 0; i < count; i++) {
+        const w = rng.float(70, Math.min(150, blockW - 8));
+        const h = rng.float(60, Math.min(130, blockH - 8));
+        const x = xr.from + rng.float(4, Math.max(5, blockW - w - 4));
+        const y = yr.from + rng.float(4, Math.max(5, blockH - h - 4));
+        const b = { x, y, w, h, roof: rng.pick(CONFIG.palette.roofs), tall: district.tall && rng.chance(0.5), district: district.name };
+        if (buildings.some((o) => rectsOverlap(b, { x: o.x - 6, y: o.y - 6, w: o.w + 12, h: o.h + 12 }))) continue;
+        buildings.push(b);
       }
     }
   }
 
-  for (let i = 0; i < 3; i += 1) cranes.push({ x: 2240 + i * 110, y: 1500, h: 150 + i * 24 });
+  // Named buildings the missions need, placed on the grid.
+  const named = [
+    { ...CONFIG.landmarks.safehouse, roof: '#8a7fb8', tall: false, district: 'Old Town', name: 'safehouse' },
+    { ...CONFIG.landmarks.paintShop, roof: '#d9a03a', tall: false, district: 'Docks', name: 'paintshop' },
+    { ...CONFIG.landmarks.policeStation, roof: '#2a4a8a', tall: false, district: 'Downtown', name: 'police' },
+    { ...CONFIG.landmarks.hospital, roof: '#e07f7f', tall: false, district: 'Old Town', name: 'hospital' },
+  ];
+  for (const n of named) buildings.push(n);
 
-  // The safehouse is a walkable yard, not a solid building: standing inside
-  // it is what halves the wanted decay, so it must not block movement.
-  // The marina lot and the pier are the same: the Falco parks in the lot
-  // and the boat waits at the end of the pier, so no building may sit on
-  // either of them or the missions that use them could not be reached.
-  const blocked = buildings.slice();
-  blocked.push(paintShop, policeStation, hospital);
-
-  function circleHits(x, y, r) {
-    if (x < r || y < r || x > WORLD.width - r) return true;
-    if (y > SEA_TOP - r) {
-      if (!(x > pier.x - r && x < pier.x + pier.w + r && y > pier.y)) return true;
+  const trees = [];
+  for (const p of parks) {
+    for (let i = 0; i < p.trees; i++) {
+      trees.push({ x: p.x + rng.float(12, p.w - 12), y: p.y + rng.float(12, p.h - 12), r: rng.float(7, 12) });
     }
-    for (const b of blocked) {
-      const nx = Math.max(b.x, Math.min(x, b.x + b.w));
-      const ny = Math.max(b.y, Math.min(y, b.y + b.h));
-      const dx = x - nx;
-      const dy = y - ny;
-      if (dx * dx + dy * dy < r * r) return true;
-    }
-    return false;
   }
-
-  function sees(x1, y1, x2, y2) {
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const dist = Math.hypot(dx, dy);
-    const steps = Math.max(1, Math.floor(dist / 24));
-    for (let i = 1; i < steps; i += 1) {
-      const px = x1 + (dx * i) / steps;
-      const py = y1 + (dy * i) / steps;
-      for (const b of blocked) {
-        if (px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h) return false;
-      }
-    }
-    return true;
+  for (let i = 0; i < 26; i++) {
+    trees.push({ x: rng.float(1700, 2500), y: rng.float(40, 900), r: rng.float(7, 12) });
   }
 
   return {
-    buildings, trees, parks, cranes, plaza,
-    safehouse, paintShop, policeStation, hospital, marinaLot, pier, boat,
-    circleHits, sees, districtAt,
+    buildings, parks, trees,
+    roadsX: roadCenters(), roadsY: roadCenters(),
+    plaza: CONFIG.landmarks.plaza,
+    pier: CONFIG.landmarks.pier,
+    beachTop: CONFIG.beachTop, seaTop: CONFIG.seaTop,
   };
+}
+
+export function districtAt(x, y) {
+  const d = CONFIG.districts.find((d) => x >= d.x && x < d.x + d.w && y >= d.y && y < d.y + d.h);
+  return d ? d.name : 'Solmar Bay';
+}
+
+export function isOnRoad(city, x, y) {
+  const half = CONFIG.roadWidth / 2;
+  for (const cx of city.roadsX) if (Math.abs(x - cx) <= half) return true;
+  for (const cy of city.roadsY) if (Math.abs(y - cy) <= half) return true;
+  return false;
+}
+
+export function isOnSidewalk(city, x, y) {
+  if (isOnRoad(city, x, y)) return false;
+  const band = CONFIG.roadWidth / 2 + CONFIG.sidewalk;
+  for (const cx of city.roadsX) if (Math.abs(x - cx) <= band) return true;
+  for (const cy of city.roadsY) if (Math.abs(y - cy) <= band) return true;
+  return false;
+}
+
+export function buildingAt(city, x, y) {
+  return city.buildings.find((b) => x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) || null;
+}
+
+export function circleHitsBuilding(city, x, y, r) {
+  for (const b of city.buildings) {
+    const nx = Math.max(b.x, Math.min(x, b.x + b.w));
+    const ny = Math.max(b.y, Math.min(y, b.y + b.h));
+    const dx = x - nx, dy = y - ny;
+    if (dx * dx + dy * dy < r * r) return b;
+  }
+  return null;
+}
+
+export function pointBlocked(city, x, y) {
+  if (x < 0 || y < 0 || x >= CONFIG.worldWidth || y >= CONFIG.worldHeight) return true;
+  if (y >= CONFIG.seaTop) return !insideRect(x, y, city.pier);
+  if (buildingAt(city, x, y)) return true;
+  return false;
+}
+
+export function hasLineOfSight(city, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.ceil(dist / 24));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (buildingAt(city, x1 + dx * t, y1 + dy * t)) return false;
+  }
+  return true;
+}
+
+export function nearestRoadPoint(city, x, y) {
+  let best = null, bestD = Infinity;
+  for (const cx of city.roadsX) {
+    const d = Math.abs(x - cx);
+    if (d < bestD) { bestD = d; best = { x: cx, y }; }
+  }
+  for (const cy of city.roadsY) {
+    const d = Math.abs(y - cy);
+    if (d < bestD) { bestD = d; best = { x, y: cy }; }
+  }
+  return best;
 }
