@@ -36,7 +36,6 @@ function main() {
   requireDir(gameDir, 'game/');
   requireDir(shotsDir, 'screenshots/');
 
-  if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
   copyTree(gameDir, join(outDir, 'game'), 'game/');
